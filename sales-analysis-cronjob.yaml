@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sales-analysis-cronjob
+  labels:
+    app: sales-analysis
+spec:
+  schedule: "* * * * *"  # Run every minute for testing
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: sales-analysis
+        spec:
+          containers:
+          - name: sales-analysis
+            image: prasisiri/sales-analysis:latest  # Replace with your registry/repository
+            imagePullPolicy: Always
+            env:
+            - name: UPLOAD_METHOD
+              value: "sftp"  # Options: sftp, s3, http
+            # Mount the configuration as a secret if needed
+            volumeMounts:
+            - name: config-volume
+              mountPath: /app/upload-config.ini
+              subPath: upload-config.ini
+            resources:
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+          # Volumes for configuration
+          volumes:
+          - name: config-volume
+            secret:
+              secretName: upload-config
+              items:
+              - key: upload-config.ini
+                path: upload-config.ini
+          restartPolicy: OnFailure
+          # Service account with necessary permissions
+          serviceAccountName: default 
