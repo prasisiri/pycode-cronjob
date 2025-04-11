@@ -1,0 +1,92 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: sales-analysis-template
+spec:
+  entrypoint: sales-analysis
+  arguments:
+    parameters:
+    - name: upload-method
+      value: sftp
+    - name: notification-email
+      value: ""
+    - name: script-name
+      value: "sales_analysis.py"
+    - name: output-file
+      value: "sales_report.csv"
+    
+  templates:
+  - name: sales-analysis
+    inputs:
+      parameters:
+      - name: upload-method
+      - name: notification-email
+      - name: script-name
+      - name: output-file
+    dag:
+      tasks:
+      - name: run-analysis
+        template: run-analysis
+        arguments:
+          parameters:
+          - name: script-name
+            value: "{{inputs.parameters.script-name}}"
+          - name: output-file
+            value: "{{inputs.parameters.output-file}}"
+          - name: upload-method
+            value: "{{inputs.parameters.upload-method}}"
+      - name: send-notification
+        template: notification
+        dependencies: [run-analysis]
+        arguments:
+          parameters:
+          - name: email
+            value: "{{inputs.parameters.notification-email}}"
+          - name: message
+            value: "Analysis script {{inputs.parameters.script-name}} has been executed and results uploaded"
+        when: "{{inputs.parameters.notification-email}} != ''"
+  
+  # Template to run the analysis script with automatic upload
+  - name: run-analysis
+    inputs:
+      parameters:
+      - name: script-name
+      - name: output-file
+      - name: upload-method
+    container:
+      image: prasisiri/sales-analysis:latest
+      env:
+      - name: SCRIPT_NAME
+        value: "{{inputs.parameters.script-name}}"
+      - name: OUTPUT_FILE
+        value: "{{inputs.parameters.output-file}}"
+      - name: UPLOAD_METHOD
+        value: "{{inputs.parameters.upload-method}}"
+      volumeMounts:
+      - name: workdir
+        mountPath: /workdir
+      - name: config-volume
+        mountPath: /app/repo/upload-config.ini
+        subPath: upload-config.ini
+
+  # Template to send a notification
+  - name: notification
+    inputs:
+      parameters:
+      - name: email
+      - name: message
+    container:
+      image: prasisiri/sales-analysis:latest
+      command: ["/bin/bash", "-c"]
+      args: ["echo 'Sending notification to {{inputs.parameters.email}}: {{inputs.parameters.message}}' && echo 'Notification sent' > /workdir/notification.txt"]
+      volumeMounts:
+      - name: workdir
+        mountPath: /workdir
+        
+  # Volumes used across templates
+  volumes:
+  - name: workdir
+    emptyDir: {}
+  - name: config-volume
+    secret:
+      secretName: upload-config 

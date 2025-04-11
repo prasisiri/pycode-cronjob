@@ -1,0 +1,463 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: data-analysis-workflow
+  generateName: data-analysis-
+spec:
+  entrypoint: main
+  # Define shared volumes for passing data between steps
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+  
+  # Define arguments that can be passed to the workflow
+  arguments:
+    parameters:
+    - name: upload-method
+      value: sftp
+    - name: notification-email
+      value: ""
+    - name: run-date
+      value: "{{workflow.creationTimestamp.strftime('%Y-%m-%d')}}"
+  
+  # Main workflow definition
+  templates:
+  - name: main
+    dag:
+      tasks:
+      # Independent data extraction jobs that can run in parallel
+      - name: extract-sales-data
+        template: extract-sales
+        arguments:
+          parameters:
+          - name: date
+            value: "{{workflow.parameters.run-date}}"
+      
+      - name: extract-customer-data
+        template: extract-customers
+      
+      - name: extract-product-data
+        template: extract-products
+      
+      # Data transformation job that depends on all extraction jobs
+      - name: transform-data
+        template: transform
+        dependencies: [extract-sales-data, extract-customer-data, extract-product-data]
+        arguments:
+          parameters:
+          - name: sales-file
+            value: "/mnt/workdir/raw_sales.csv"
+          - name: customers-file
+            value: "/mnt/workdir/customer_data.csv"
+          - name: products-file
+            value: "/mnt/workdir/product_data.csv"
+          - name: output-file
+            value: "/mnt/workdir/transformed_data.csv"
+      
+      # Independent analysis jobs that all depend on the transformation job
+      - name: sales-analysis
+        template: analyze-sales
+        dependencies: [transform-data]
+        arguments:
+          parameters:
+          - name: input-file
+            value: "/mnt/workdir/transformed_data.csv"
+          - name: output-file
+            value: "/mnt/workdir/sales_report.csv"
+      
+      - name: customer-analysis
+        template: analyze-customers
+        dependencies: [transform-data]
+        arguments:
+          parameters:
+          - name: input-file
+            value: "/mnt/workdir/transformed_data.csv"
+          - name: output-file
+            value: "/mnt/workdir/customer_report.csv"
+      
+      - name: product-analysis
+        template: analyze-products
+        dependencies: [transform-data]
+        arguments:
+          parameters:
+          - name: input-file
+            value: "/mnt/workdir/transformed_data.csv"
+          - name: output-file
+            value: "/mnt/workdir/product_report.csv"
+      
+      # Upload jobs that depend on their respective analysis jobs
+      - name: upload-sales-report
+        template: upload-file
+        dependencies: [sales-analysis]
+        arguments:
+          parameters:
+          - name: file-path
+            value: "/mnt/workdir/sales_report.csv"
+          - name: upload-method
+            value: "{{workflow.parameters.upload-method}}"
+      
+      - name: upload-customer-report
+        template: upload-file
+        dependencies: [customer-analysis]
+        arguments:
+          parameters:
+          - name: file-path
+            value: "/mnt/workdir/customer_report.csv"
+          - name: upload-method
+            value: "{{workflow.parameters.upload-method}}"
+      
+      - name: upload-product-report
+        template: upload-file
+        dependencies: [product-analysis]
+        arguments:
+          parameters:
+          - name: file-path
+            value: "/mnt/workdir/product_report.csv"
+          - name: upload-method
+            value: "{{workflow.parameters.upload-method}}"
+      
+      # Notification step that depends on all uploads completing
+      - name: send-notification
+        template: notification
+        dependencies: [upload-sales-report, upload-customer-report, upload-product-report]
+        arguments:
+          parameters:
+          - name: email
+            value: "{{workflow.parameters.notification-email}}"
+          - name: message
+            value: "All reports have been generated and uploaded successfully"
+        when: "{{workflow.parameters.notification-email}} != ''"
+  
+  # Extract sales data
+  - name: extract-sales
+    inputs:
+      parameters:
+      - name: date
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["pip install pandas && python -c \"
+        import pandas as pd;
+        import datetime;
+        import numpy as np;
+        
+        # Generate sample sales data
+        n_rows = 100;
+        np.random.seed(42);
+        
+        data = {
+            'id': range(1, n_rows + 1),
+            'customer_id': np.random.randint(1, 21, n_rows),
+            'product_id': np.random.randint(1, 31, n_rows),
+            'date': [(datetime.datetime.strptime('{{inputs.parameters.date}}', '%Y-%m-%d') - 
+                    datetime.timedelta(days=np.random.randint(0, 30))).strftime('%Y-%m-%d') 
+                    for _ in range(n_rows)],
+            'quantity': np.random.randint(1, 10, n_rows),
+            'price': np.random.uniform(10, 1000, n_rows).round(2),
+            'region': np.random.choice(['North', 'South', 'East', 'West'], n_rows)
+        };
+        
+        df = pd.DataFrame(data);
+        df.to_csv('/mnt/workdir/raw_sales.csv', index=False);
+        print(f'Generated {n_rows} rows of sales data');
+        \""]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+  
+  # Extract customer data
+  - name: extract-customers
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["pip install pandas && python -c \"
+        import pandas as pd;
+        import numpy as np;
+        
+        # Generate sample customer data
+        n_customers = 20;
+        np.random.seed(43);
+        
+        data = {
+            'customer_id': range(1, n_customers + 1),
+            'customer_name': [f'Customer {i}' for i in range(1, n_customers + 1)],
+            'customer_segment': np.random.choice(['Small', 'Medium', 'Large', 'Enterprise'], n_customers),
+            'join_date': [(pd.Timestamp('2020-01-01') + 
+                         pd.Timedelta(days=np.random.randint(0, 365*2))).strftime('%Y-%m-%d') 
+                         for _ in range(n_customers)]
+        };
+        
+        df = pd.DataFrame(data);
+        df.to_csv('/mnt/workdir/customer_data.csv', index=False);
+        print(f'Generated {n_customers} rows of customer data');
+        \""]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+  
+  # Extract product data
+  - name: extract-products
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["pip install pandas && python -c \"
+        import pandas as pd;
+        import numpy as np;
+        
+        # Generate sample product data
+        n_products = 30;
+        np.random.seed(44);
+        
+        data = {
+            'product_id': range(1, n_products + 1),
+            'product_name': [f'Product {i}' for i in range(1, n_products + 1)],
+            'category': np.random.choice(['Electronics', 'Furniture', 'Clothing', 'Books', 'Food'], n_products),
+            'cost': np.random.uniform(5, 500, n_products).round(2)
+        };
+        
+        df = pd.DataFrame(data);
+        df.to_csv('/mnt/workdir/product_data.csv', index=False);
+        print(f'Generated {n_products} rows of product data');
+        \""]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+  
+  # Transform data
+  - name: transform
+    inputs:
+      parameters:
+      - name: sales-file
+      - name: customers-file
+      - name: products-file
+      - name: output-file
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["pip install pandas && 
+        wget -q -O /tmp/transform_data.py https://raw.githubusercontent.com/prasisiri/python-rules/main/transform_data.py || 
+        echo \"
+        #!/usr/bin/env python3
+        
+        import pandas as pd
+        import os
+        
+        def main():
+            # Load files
+            sales = pd.read_csv('{{inputs.parameters.sales-file}}')
+            customers = pd.read_csv('{{inputs.parameters.customers-file}}')
+            products = pd.read_csv('{{inputs.parameters.products-file}}')
+            
+            # Merge data
+            merged = sales.merge(customers, on='customer_id', how='left') \\
+                          .merge(products, on='product_id', how='left')
+            
+            # Handle missing values
+            merged = merged.fillna({'customer_name': 'Unknown', 'category': 'Unknown'})
+            
+            # Add calculated fields
+            if 'price' in merged.columns and 'quantity' in merged.columns:
+                merged['total'] = merged['price'] * merged['quantity']
+                
+            # Save transformed data
+            merged.to_csv('{{inputs.parameters.output-file}}', index=False)
+            print(f'Transformed data saved with {len(merged)} rows and {len(merged.columns)} columns')
+            
+        if __name__ == '__main__':
+            main()
+        \" > /tmp/transform_data.py && 
+        python /tmp/transform_data.py"]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+  
+  # Analyze sales
+  - name: analyze-sales
+    inputs:
+      parameters:
+      - name: input-file
+      - name: output-file
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["pip install pandas && python -c \"
+        import pandas as pd
+        
+        # Load transformed data
+        data = pd.read_csv('{{inputs.parameters.input-file}}')
+        
+        # Analyze by region, date, and category
+        if all(col in data.columns for col in ['region', 'date', 'category']):
+            # Convert date to datetime
+            data['date'] = pd.to_datetime(data['date'])
+            data['month'] = data['date'].dt.strftime('%Y-%m')
+            
+            # Calculate sales metrics
+            sales_by_region = data.groupby('region')['price'].agg(['sum', 'mean', 'count'])
+            sales_by_month = data.groupby('month')['price'].sum()
+            sales_by_category = data.groupby('category')['price'].sum()
+            
+            # Create summary dataframe
+            results = pd.DataFrame({
+                'Total Sales': [data['price'].sum()],
+                'Average Order Value': [data['price'].mean()],
+                'Total Orders': [len(data)],
+                'Top Region': [sales_by_region['sum'].idxmax()],
+                'Top Category': [sales_by_category.idxmax()]
+            })
+            
+            # Save reports
+            results.to_csv('{{inputs.parameters.output-file}}', index=False)
+            sales_by_region.to_csv('{{inputs.parameters.output-file}}'.replace('.csv', '_by_region.csv'))
+            sales_by_month.to_csv('{{inputs.parameters.output-file}}'.replace('.csv', '_by_month.csv'))
+            sales_by_category.to_csv('{{inputs.parameters.output-file}}'.replace('.csv', '_by_category.csv'))
+            
+            print('Sales analysis completed successfully')
+        else:
+            print('Required columns missing from data')
+            exit(1)
+        \""]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+  
+  # Analyze customers
+  - name: analyze-customers
+    inputs:
+      parameters:
+      - name: input-file
+      - name: output-file
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["pip install pandas && 
+        wget -q -O /tmp/customer_analysis.py https://raw.githubusercontent.com/prasisiri/python-rules/main/customer_analysis.py || 
+        cp /mnt/workdir/customer_analysis.py /tmp/customer_analysis.py || 
+        echo \"
+        #!/usr/bin/env python3
+        
+        import pandas as pd
+        
+        # Load transformed data
+        data = pd.read_csv('{{inputs.parameters.input-file}}')
+        
+        # Create customer segments
+        if 'customer_id' in data.columns and 'price' in data.columns:
+            # Calculate customer metrics
+            customer_metrics = data.groupby('customer_id').agg({
+                'price': ['sum', 'mean', 'count']
+            })
+            
+            customer_metrics.columns = ['total_spend', 'avg_order', 'num_orders']
+            
+            # Create segments
+            def get_segment(row):
+                if row['total_spend'] > 2000:
+                    return 'High Value'
+                elif row['total_spend'] > 1000:
+                    return 'Medium Value'
+                else:
+                    return 'Low Value'
+                    
+            customer_metrics['segment'] = customer_metrics.apply(get_segment, axis=1)
+            
+            # Save report
+            customer_metrics.to_csv('{{inputs.parameters.output-file}}')
+            print('Customer analysis completed successfully')
+        else:
+            print('Required columns missing from data')
+            exit(1)
+        \" > /tmp/customer_analysis.py && 
+        python /tmp/customer_analysis.py --input {{inputs.parameters.input-file}} --output {{inputs.parameters.output-file}}"]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+  
+  # Analyze products
+  - name: analyze-products
+    inputs:
+      parameters:
+      - name: input-file
+      - name: output-file
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["pip install pandas && python -c \"
+        import pandas as pd
+        
+        # Load transformed data
+        data = pd.read_csv('{{inputs.parameters.input-file}}')
+        
+        # Create product performance analysis
+        if all(col in data.columns for col in ['product_id', 'product_name', 'price', 'quantity']):
+            # Calculate metrics
+            product_metrics = data.groupby(['product_id', 'product_name']).agg({
+                'price': 'sum',
+                'quantity': 'sum'
+            }).reset_index()
+            
+            # Add calculated fields
+            if 'cost' in data.columns:
+                # Merge with cost data (using first cost value for each product)
+                product_costs = data[['product_id', 'cost']].drop_duplicates()
+                product_metrics = product_metrics.merge(product_costs, on='product_id')
+                product_metrics['profit'] = product_metrics['price'] - (product_metrics['cost'] * product_metrics['quantity'])
+                product_metrics['profit_margin'] = (product_metrics['profit'] / product_metrics['price'] * 100).round(2)
+            
+            # Sort by sales
+            product_metrics = product_metrics.sort_values('price', ascending=False)
+            
+            # Save report
+            product_metrics.to_csv('{{inputs.parameters.output-file}}', index=False)
+            print('Product analysis completed successfully')
+        else:
+            print('Required columns missing from data')
+            exit(1)
+        \""]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+  
+  # Upload file
+  - name: upload-file
+    inputs:
+      parameters:
+      - name: file-path
+      - name: upload-method
+    container:
+      image: prasisiri/sales-analysis:latest
+      command: [python]
+      args: ["/app/file-upload.py", "--file", "{{inputs.parameters.file-path}}", "--config", "/app/upload-config.ini", "--method", "{{inputs.parameters.upload-method}}"]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir
+      - name: config-volume
+        mountPath: /app/upload-config.ini
+        subPath: upload-config.ini
+    volumes:
+    - name: config-volume
+      secret:
+        secretName: upload-config
+  
+  # Send notification
+  - name: notification
+    inputs:
+      parameters:
+      - name: email
+      - name: message
+    container:
+      image: python:3.9-slim
+      command: [bash, -c]
+      args: ["echo 'Sending notification to {{inputs.parameters.email}}: {{inputs.parameters.message}}' && 
+              echo 'Notification content:' && 
+              echo 'Workflow completed at: '$(date) && 
+              echo 'Files generated:' && 
+              ls -la /mnt/workdir/*.csv"]
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/workdir 

@@ -1,0 +1,264 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: sales-analysis-cron
+spec:
+  schedule: "0 0 * * *"  # Run at midnight every day
+  timezone: "UTC"        # Use UTC timezone
+  concurrencyPolicy: Replace  # Replace existing workflow if it's still running
+  startingDeadlineSeconds: 300  # Start within 5 minutes of scheduled time
+  successfulJobsHistoryLimit: 5  # Keep history of 5 successful workflows
+  failedJobsHistoryLimit: 3      # Keep history of 3 failed workflows
+  
+  # Workflow template to run
+  workflowSpec:
+    # Use ServiceAccount with proper permissions
+    serviceAccountName: workflow
+    
+    # Define shared volumes for passing data between steps
+    volumeClaimTemplates:
+    - metadata:
+        name: workdir
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 1Gi
+    
+    # Define arguments that can be passed to the workflow
+    arguments:
+      parameters:
+      - name: upload-method
+        value: sftp
+      - name: notification-email
+        value: ""
+      - name: run-date
+        value: "{{workflow.creationTimestamp.strftime('%Y-%m-%d')}}"
+      - name: script-name
+        value: "sales_analysis.py"
+      - name: output-file
+        value: "sales_report.csv"
+    
+    # Main workflow definition
+    entrypoint: main
+    templates:
+    - name: main
+      dag:
+        tasks:
+        # Independent data extraction jobs that can run in parallel
+        - name: extract-sales-data
+          template: extract-sales
+          arguments:
+            parameters:
+            - name: date
+              value: "{{workflow.parameters.run-date}}"
+            - name: output-file
+              value: "/mnt/workdir/raw_sales.csv"
+        
+        - name: extract-customer-data
+          template: extract-customers
+          arguments:
+            parameters:
+            - name: output-file
+              value: "/mnt/workdir/customer_data.csv"
+        
+        - name: extract-product-data
+          template: extract-products
+          arguments:
+            parameters:
+            - name: output-file
+              value: "/mnt/workdir/product_data.csv"
+        
+        # Data transformation job that depends on all extraction jobs
+        - name: transform-data
+          template: transform
+          dependencies: [extract-sales-data, extract-customer-data, extract-product-data]
+          arguments:
+            parameters:
+            - name: sales-file
+              value: "/mnt/workdir/raw_sales.csv"
+            - name: customers-file
+              value: "/mnt/workdir/customer_data.csv"
+            - name: products-file
+              value: "/mnt/workdir/product_data.csv"
+            - name: output-file
+              value: "/mnt/workdir/transformed_data.csv"
+        
+        # Independent analysis jobs that all depend on the transformation job
+        - name: sales-analysis
+          template: run-analysis
+          dependencies: [transform-data]
+          arguments:
+            parameters:
+            - name: script-name
+              value: "sales_analysis.py"
+            - name: input-file
+              value: "/mnt/workdir/transformed_data.csv"
+            - name: output-file
+              value: "/mnt/workdir/sales_report.csv"
+            - name: upload-method
+              value: "{{workflow.parameters.upload-method}}"
+        
+        - name: customer-analysis
+          template: run-analysis
+          dependencies: [transform-data]
+          arguments:
+            parameters:
+            - name: script-name
+              value: "customer_analysis.py"
+            - name: input-file
+              value: "/mnt/workdir/transformed_data.csv"
+            - name: output-file
+              value: "/mnt/workdir/customer_report.csv"
+            - name: upload-method
+              value: "{{workflow.parameters.upload-method}}"
+        
+        - name: product-analysis
+          template: run-analysis
+          dependencies: [transform-data]
+          arguments:
+            parameters:
+            - name: script-name
+              value: "product_analysis.py"
+            - name: input-file
+              value: "/mnt/workdir/transformed_data.csv"
+            - name: output-file
+              value: "/mnt/workdir/product_report.csv"
+            - name: upload-method
+              value: "{{workflow.parameters.upload-method}}"
+        
+        # Notification step that depends on all analysis jobs
+        - name: send-notification
+          template: notification
+          dependencies: [sales-analysis, customer-analysis, product-analysis]
+          arguments:
+            parameters:
+            - name: email
+              value: "{{workflow.parameters.notification-email}}"
+            - name: message
+              value: "All analysis reports have been generated and uploaded successfully"
+          when: "{{workflow.parameters.notification-email}} != ''"
+    
+    # Extract sales data
+    - name: extract-sales
+      inputs:
+        parameters:
+        - name: date
+        - name: output-file
+      container:
+        image: prasisiri/sales-analysis:latest
+        env:
+        - name: SCRIPT_NAME
+          value: "extract_sales.py"
+        - name: OUTPUT_FILE
+          value: "{{inputs.parameters.output-file}}"
+        - name: RUN_DATE
+          value: "{{inputs.parameters.date}}"
+        volumeMounts:
+        - name: workdir
+          mountPath: /mnt/workdir
+    
+    # Extract customer data
+    - name: extract-customers
+      inputs:
+        parameters:
+        - name: output-file
+      container:
+        image: prasisiri/sales-analysis:latest
+        env:
+        - name: SCRIPT_NAME
+          value: "extract_customers.py"
+        - name: OUTPUT_FILE
+          value: "{{inputs.parameters.output-file}}"
+        volumeMounts:
+        - name: workdir
+          mountPath: /mnt/workdir
+    
+    # Extract product data
+    - name: extract-products
+      inputs:
+        parameters:
+        - name: output-file
+      container:
+        image: prasisiri/sales-analysis:latest
+        env:
+        - name: SCRIPT_NAME
+          value: "extract_products.py"
+        - name: OUTPUT_FILE
+          value: "{{inputs.parameters.output-file}}"
+        volumeMounts:
+        - name: workdir
+          mountPath: /mnt/workdir
+    
+    # Transform data
+    - name: transform
+      inputs:
+        parameters:
+        - name: sales-file
+        - name: customers-file
+        - name: products-file
+        - name: output-file
+      container:
+        image: prasisiri/sales-analysis:latest
+        env:
+        - name: SCRIPT_NAME
+          value: "transform_data.py"
+        - name: OUTPUT_FILE
+          value: "{{inputs.parameters.output-file}}"
+        - name: SALES_FILE
+          value: "{{inputs.parameters.sales-file}}"
+        - name: CUSTOMERS_FILE
+          value: "{{inputs.parameters.customers-file}}"
+        - name: PRODUCTS_FILE
+          value: "{{inputs.parameters.products-file}}"
+        volumeMounts:
+        - name: workdir
+          mountPath: /mnt/workdir
+    
+    # Run analysis
+    - name: run-analysis
+      inputs:
+        parameters:
+        - name: script-name
+        - name: input-file
+        - name: output-file
+        - name: upload-method
+      container:
+        image: prasisiri/sales-analysis:latest
+        env:
+        - name: SCRIPT_NAME
+          value: "{{inputs.parameters.script-name}}"
+        - name: OUTPUT_FILE
+          value: "{{inputs.parameters.output-file}}"
+        - name: INPUT_FILE
+          value: "{{inputs.parameters.input-file}}"
+        - name: UPLOAD_METHOD
+          value: "{{inputs.parameters.upload-method}}"
+        volumeMounts:
+        - name: workdir
+          mountPath: /mnt/workdir
+        - name: config-volume
+          mountPath: /app/repo/upload-config.ini
+          subPath: upload-config.ini
+      volumes:
+      - name: config-volume
+        secret:
+          secretName: upload-config
+    
+    # Send notification
+    - name: notification
+      inputs:
+        parameters:
+        - name: email
+        - name: message
+      container:
+        image: python:3.9-slim
+        command: [bash, -c]
+        args: ["echo 'Sending notification to {{inputs.parameters.email}}: {{inputs.parameters.message}}' && 
+                echo 'Notification content:' && 
+                echo 'Workflow completed at: '$(date) && 
+                echo 'Files generated:' && 
+                ls -la /mnt/workdir/*.csv"]
+        volumeMounts:
+        - name: workdir
+          mountPath: /mnt/workdir 
