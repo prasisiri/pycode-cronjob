@@ -72,7 +72,9 @@ oc -n argo expose service argo-server
 echo https://$(oc -n argo get route argo-server -o jsonpath='{.spec.host}')
 ```
 
-## Architecture
+## Workflow Architecture
+
+The following diagram illustrates the data flow in our workflow:
 
 ```mermaid
 graph TD
@@ -137,6 +139,15 @@ This architecture shows:
 - Multiple analysis jobs that can run in parallel
 - Multiple upload options (SFTP, S3, HTTP) for flexibility
 - A final notification step that depends on all uploads
+
+## Docker Build and Workflow Process
+
+For details on how our Docker images are built from GitHub scripts and then used in Argo Workflows, see [Docker Build and Workflow Process](build-and-execution-flow.md). This includes:
+
+- How Python scripts are pulled from GitHub
+- The two approaches to building Docker images (build-time vs. runtime script fetching)
+- How the container image is referenced in the Argo Workflow YAML
+- The passing of artifacts between workflow steps
 
 ## Implementation Files
 
