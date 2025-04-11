@@ -149,6 +149,19 @@ For details on how our Docker images are built from GitHub scripts and then used
 - How the container image is referenced in the Argo Workflow YAML
 - The passing of artifacts between workflow steps
 
+## Business Rules Integration
+
+We've implemented a separation of concerns that allows business teams to own and maintain their own analysis rules while the technical team maintains the workflow infrastructure. 
+
+Business rules are maintained in a separate GitHub repository ([github.com/prasisiri/python-rules](https://github.com/prasisiri/python-rules)) and are dynamically pulled into the workflow at runtime.
+
+Key benefits:
+- Business teams can update rules without requiring Docker rebuilds or workflow changes
+- Clear ownership boundaries between technical infrastructure and business logic
+- Business users receive analysis results via SFTP and email for review
+
+For complete details on this approach, see [Business Rules Integration](business-rules-integration.md).
+
 ## Implementation Files
 
 This repository contains:
